@@ -25,6 +25,15 @@ app:
   # 首次启动时写入演示数据（站点/暂存柜/积分规则/礼品/测试账号/活动日）
   seed-demo-data: ${SEED_DEMO_DATA:true}
 
+# OpenAPI 3 文档与 Swagger UI（后端服务）：
+#   文档 JSON: /v3/api-docs   Swagger UI: /swagger-ui.html
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+
 logging:
   level:
     root: info

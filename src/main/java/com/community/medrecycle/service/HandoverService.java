@@ -26,6 +26,7 @@ public class HandoverService {
     private final StorageCabinetRepository cabinetRepository;
     private final StorageEntryRepository entryRepository;
     private final ExceptionService exceptionService;
+    private final FreezeService freezeService;
     private final BatchRefresher batchRefresher;
 
     /** 建交接单：默认取站点全部暂存袋；未达环保公司上门量时拒绝（可 force 强制） */
@@ -159,9 +160,11 @@ public class HandoverService {
                 // 拒收袋退回暂存，等待后续处理
                 bag.setStatus(BagStatus.STORED);
                 bagRepository.save(bag);
-                exceptionService.recordAuto(ExceptionType.COMPANY_REJECT, bag,
-                        "环保公司拒收 " + bag.getCategory() + " 袋 " + bag.getBagNo()
-                                + "，原因: " + (result.rejectReason() == null ? "未说明" : result.rejectReason()));
+                String rejectReason = result.rejectReason() == null ? "未说明" : result.rejectReason();
+                ExceptionRecord rejectEx = exceptionService.recordAuto(ExceptionType.COMPANY_REJECT, bag,
+                        "环保公司拒收 " + bag.getCategory() + " 袋 " + bag.getBagNo() + "，原因: " + rejectReason);
+                // 该袋已发积分进入冻结/追缴流程（未发积分则不产生冻结单）
+                freezeService.freezeForRejectedBag(bag, rejectReason, rejectEx.getExceptionNo());
             }
             itemRepository.save(item);
             batchIds.add(bag.getBatchId());

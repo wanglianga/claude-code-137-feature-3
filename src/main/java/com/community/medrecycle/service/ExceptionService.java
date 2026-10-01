@@ -74,6 +74,7 @@ public class ExceptionService {
                     pointsService.revoke(batch.getResidentId(), bag.getPoints(), "BAG", bag.getBagNo(),
                             "夹带未过期药扣回，异常单 " + record.getExceptionNo());
                     bag.setPointsGranted(false);
+                    bag.setGrantedPoints(0);
                 }
                 sendBackToReview(batch, bag, "NON_EXPIRED_DRUG");
             }
@@ -83,8 +84,8 @@ public class ExceptionService {
                     sendBackToReview(batch, bag, record.getType().name());
                 }
             }
-            case WEIGHT_DISPUTE, EXCHANGE_FAILED, COMPANY_REJECT -> {
-                // 称重争议走 reweigh 解决；兑换失败/公司拒收仅记录跟踪
+            case WEIGHT_DISPUTE, EXCHANGE_FAILED, COMPANY_REJECT, POINTS_GRANT_FAILED -> {
+                // 称重争议走 reweigh 解决；兑换失败/公司拒收/发放失败走对应专项处置流程
             }
         }
     }
@@ -168,6 +169,9 @@ public class ExceptionService {
 
         bag.setWeightKg(newWeightKg);
         bag.setPoints(newPoints);
+        if (bag.isPointsGranted()) {
+            bag.setGrantedPoints(newPoints);
+        }
         bagRepository.save(bag);
 
         if (bag.isPointsGranted() && newPoints != oldPoints) {

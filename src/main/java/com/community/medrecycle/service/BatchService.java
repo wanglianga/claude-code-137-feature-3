@@ -28,8 +28,11 @@ public class BatchService {
     private final HandoverOrderRepository handoverOrderRepository;
     private final ExceptionRecordRepository exceptionRecordRepository;
     private final PointsTransactionRepository pointsTransactionRepository;
+    private final PointsIssueRepository pointsIssueRepository;
+    private final PointsFreezeRepository pointsFreezeRepository;
     private final PointsRuleService pointsRuleService;
     private final PointsService pointsService;
+    private final PointsIssueService pointsIssueService;
     private final BatchRefresher batchRefresher;
 
     /** 回收员现场扫码登记：预约 -> 批次 */
@@ -161,15 +164,39 @@ public class BatchService {
         reviewTaskRepository.save(task);
     }
 
-    /** 发放单袋积分（幂等：已发放则跳过） */
-    void grantBagPoints(RecycleBatch batch, DrugBag bag) {
+    /**
+     * 发放单袋积分（幂等：已发放则跳过）。
+     * 居民账户冻结等可预期阻断在发放前判定，直接落失败单转客服；
+     * 账务系统异常等不可期失败兜底落失败单。均不中断回收流程。
+     * 返回 true 表示已成功入账。
+     */
+    boolean grantBagPoints(RecycleBatch batch, DrugBag bag) {
         if (bag.isPointsGranted() || bag.getPoints() <= 0) {
-            return;
+            return bag.isPointsGranted();
         }
-        pointsService.grant(batch.getResidentId(), bag.getPoints(), "BAG", bag.getBagNo(),
-                "回收发放 " + bag.getCategory() + " " + bag.getWeightKg() + "kg");
-        bag.setPointsGranted(true);
-        bagRepository.save(bag);
+        Appointment appointment = appointmentRepository.findById(batch.getAppointmentId()).orElseThrow();
+        // 前置校验：账户冻结不进入发放事务，避免异常把称重事务污染为 rollback-only
+        if (pointsService.isFrozen(batch.getResidentId())) {
+            pointsIssueService.recordGrantFailure(batch, bag, appointment,
+                    GrantFailReason.ACCOUNT_FROZEN, "居民积分账户处于冻结状态，发放前置校验未通过");
+            return false;
+        }
+        try {
+            pointsService.grant(batch.getResidentId(), bag.getPoints(), "BAG", bag.getBagNo(),
+                    "回收发放 " + bag.getCategory() + " " + bag.getWeightKg() + "kg");
+            bag.setPointsGranted(true);
+            bag.setGrantedPoints(bag.getPoints());
+            bagRepository.save(bag);
+            return true;
+        } catch (com.community.medrecycle.config.PointsGrantException e) {
+            pointsIssueService.recordGrantFailure(batch, bag, appointment, e.getReason(), e.getMessage());
+            return false;
+        } catch (RuntimeException e) {
+            // 账务系统故障/超时等：发放未确认入账，记系统错误失败单，交客服核实后补发
+            pointsIssueService.recordGrantFailure(batch, bag, appointment,
+                    GrantFailReason.GRANT_SYSTEM_ERROR, e.toString());
+            return false;
+        }
     }
 
     void raiseAutoException(RecycleBatch batch, DrugBag bag, ExceptionType type, String description) {
@@ -218,6 +245,9 @@ public class BatchService {
             }
             view.put("handovers", handovers);
             view.put("pointsTransactions", pointsTransactionRepository.findByRefTypeAndRefId("BAG", bag.getBagNo()));
+            // 积分发放失败补发单与拒收冻结/追缴状态（无则为 null）
+            view.put("pointsIssue", pointsIssueRepository.findByBagNo(bag.getBagNo()).orElse(null));
+            view.put("pointsFreeze", pointsFreezeRepository.findByBagNo(bag.getBagNo()).orElse(null));
             bagViews.add(view);
         }
 

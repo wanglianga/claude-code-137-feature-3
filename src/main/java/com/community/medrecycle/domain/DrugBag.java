@@ -52,9 +52,13 @@ public class DrugBag {
     @Column(nullable = false)
     private boolean highRisk;
 
-    /** 本袋应发积分 */
+    /** 本袋应发积分（按规则快照与活动倍率计算） */
     @Column(nullable = false)
     private int points = 0;
+
+    /** 实际已发放/补发入账的积分（驳回未发时为 0；拒收冻结追缴依据） */
+    @Column(nullable = false)
+    private int grantedPoints = 0;
 
     @Column(nullable = false)
     private boolean pointsGranted = false;

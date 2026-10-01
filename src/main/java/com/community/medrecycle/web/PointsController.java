@@ -22,11 +22,29 @@ import java.util.Map;
 public class PointsController {
 
     private final PointsService pointsService;
+    private final com.community.medrecycle.service.PointsIssueService pointsIssueService;
 
     @GetMapping("/balance")
     public Map<String, Object> balance() {
         Account resident = AuthContext.requireRole(Role.RESIDENT);
         return Map.of("residentId", resident.getId(), "balance", pointsService.balanceOf(resident.getId()));
+    }
+
+    /** 账户视图：可用余额、拒收冻结余额、账户状态 */
+    @GetMapping("/account")
+    public Map<String, Object> account() {
+        Account resident = AuthContext.requireRole(Role.RESIDENT);
+        return pointsService.accountView(resident.getId());
+    }
+
+    /**
+     * 居民积分台账：每笔积分来源流水 + 发放失败单处理状态 + 纸质兑换券 +
+     * 拒收冻结/追缴与处理依据，一屏看清积分从哪来、现在什么状态。
+     */
+    @GetMapping("/ledger")
+    public Map<String, Object> ledger() {
+        Account resident = AuthContext.requireRole(Role.RESIDENT);
+        return pointsIssueService.residentPointsView(resident.getId());
     }
 
     @GetMapping("/transactions")

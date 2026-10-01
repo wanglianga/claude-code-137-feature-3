@@ -184,6 +184,135 @@ CODE=$(curl -s -o /tmp/ex_fail.json -w '%{http_code}' -X POST "${AUTH_R[@]}" "${
 check "余额不足兑换失败(409)" "$CODE" "409"
 check "失败单已记录" "$(jq -r '.status' /tmp/ex_fail.json)" "FAILED"
 
+echo "== 15. 积分发放失败 -> 客服复核补发（含原因/规则/批次/账户快照，防重复补发） =="
+T_SERVICE=$(login service1 service123)
+LOGIN_R2=$(curl -s -X POST "$BASE/api/auth/login" -H 'Content-Type: application/json' \
+  -d '{"username":"resident2","password":"resident123"}')
+T_RESIDENT2=$(echo "$LOGIN_R2" | jq -r '.token')
+RID2=$(echo "$LOGIN_R2" | jq -r '.account.id')
+AUTH_S=(-H "X-Auth-Token: $T_SERVICE")
+AUTH_R2=(-H "X-Auth-Token: $T_RESIDENT2")
+check "客服登录" "$([ -n "$T_SERVICE" ] && [ "$T_SERVICE" != null ] && echo ok)" "ok"
+
+# 管理员先冻结居民2账户；居民2称重 2kg 片剂应发 20 分，因账户冻结发放失败
+curl -s -X POST "${AUTH_A[@]}" "${JSON[@]}" "$BASE/api/admin/points-accounts/freeze" -d "{\"residentId\": $RID2}" > /dev/null
+APPT4_NO=$(curl -s -X POST "${AUTH_R2[@]}" "${JSON[@]}" "$BASE/api/appointments" -d "{
+  \"siteId\": $SITE_ID, \"drugTypeDesc\": \"普通片剂\", \"estimatedQty\": 2,
+  \"hasPrescription\": false, \"hasLiquid\": false, \"hasInjection\": false, \"hasPersonalInfo\": false}" | jq -r '.appointmentNo')
+BATCH4_NO=$(curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/batches/check-in" -d "{\"appointmentNo\": \"$APPT4_NO\"}" | jq -r '.batchNo')
+curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/batches/$BATCH4_NO/weigh" \
+  -d '{"items": [{"category": "TABLET", "weightKg": 2.0, "sealNo": "SEAL-PI-2001", "photoUrls": "photo://pi"}]}' > /dev/null
+PI1_NO=$(curl -s "${AUTH_W[@]}" "$BASE/api/batches/$BATCH4_NO/trace" | jq -r '.bags[0].pointsIssue.issueNo')
+check "冻结账户称重产生发放失败单" "$(echo "$PI1_NO" | grep -c '^PI')" "1"
+PI1=$(curl -s "${AUTH_S[@]}" "$BASE/api/points-issues/$PI1_NO")
+check "失败单待复核" "$(echo "$PI1" | jq -r '.issue.status')" "PENDING"
+check "失败原因=账户冻结" "$(echo "$PI1" | jq -r '.issue.failReason')" "ACCOUNT_FROZEN"
+check "失败时账户状态快照" "$(echo "$PI1" | jq -r '.issue.accountStatusAtFailure')" "FROZEN"
+check "失败单固化积分规则快照" "$(echo "$PI1" | jq -r '.issue.pointsRuleSnapshot' | grep -c 'TABLET:10')" "1"
+check "失败单关联批次" "$(echo "$PI1" | jq -r '.issue.batchNo')" "$BATCH4_NO"
+check "客服可见是否已兑换(否)" "$(echo "$PI1" | jq -r '.residentEverExchanged')" "false"
+check "失败期积分未入账" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/points/balance" | jq '.balance')" "0"
+check "发放失败异常自动登记" "$(curl -s "${AUTH_W[@]}" "$BASE/api/exceptions" | jq '[.[] | select(.type=="POINTS_GRANT_FAILED")] | length' | grep -c '^[1-9]')" "1"
+# 冻结期间补发应被拒(409)
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${AUTH_S[@]}" "${JSON[@]}" "$BASE/api/points-issues/$PI1_NO/reissue" -d '{"note":"尝试补发"}')
+check "账户冻结期补发被拒(409)" "$CODE" "409"
+# 解冻后补发
+curl -s -X POST "${AUTH_A[@]}" "${JSON[@]}" "$BASE/api/admin/points-accounts/unfreeze" -d "{\"residentId\": $RID2}" > /dev/null
+curl -s -X POST "${AUTH_S[@]}" "${JSON[@]}" "$BASE/api/points-issues/$PI1_NO/reissue" -d '{"note":"核实后补发"}' > /dev/null
+check "补发后状态 REISSUED" "$(curl -s "${AUTH_S[@]}" "$BASE/api/points-issues/$PI1_NO" | jq -r '.issue.status')" "REISSUED"
+check "补发积分 20 入账" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/points/balance" | jq '.balance')" "20"
+check "补发异常联动办结" "$(curl -s "${AUTH_W[@]}" "$BASE/api/exceptions?status=RESOLVED" | jq "[.[] | select(.type==\"POINTS_GRANT_FAILED\")] | length" | grep -c '^[1-9]')" "1"
+# 防重复补发
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${AUTH_S[@]}" "${JSON[@]}" "$BASE/api/points-issues/$PI1_NO/reissue" -d '{"note":"再次补发"}')
+check "重复补发被拒(409)" "$CODE" "409"
+check "防重复补发余额不变" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/points/balance" | jq '.balance')" "20"
+check "居民台账可见失败单" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/points/ledger" | jq '[.issues[] | select(.issueNo=="'$PI1_NO'")] | length')" "1"
+
+echo "== 16. 客服改为纸质兑换券（不入账户，线下兑付防重复） =="
+curl -s -X POST "${AUTH_A[@]}" "${JSON[@]}" "$BASE/api/admin/points-accounts/freeze" -d "{\"residentId\": $RID2}" > /dev/null
+APPT5_NO=$(curl -s -X POST "${AUTH_R2[@]}" "${JSON[@]}" "$BASE/api/appointments" -d "{
+  \"siteId\": $SITE_ID, \"drugTypeDesc\": \"普通片剂\", \"estimatedQty\": 3,
+  \"hasPrescription\": false, \"hasLiquid\": false, \"hasInjection\": false, \"hasPersonalInfo\": false}" | jq -r '.appointmentNo')
+BATCH5_NO=$(curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/batches/check-in" -d "{\"appointmentNo\": \"$APPT5_NO\"}" | jq -r '.batchNo')
+curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/batches/$BATCH5_NO/weigh" \
+  -d '{"items": [{"category": "TABLET", "weightKg": 3.0, "sealNo": "SEAL-PV-2002", "photoUrls": "photo://pv"}]}' > /dev/null
+PI2_NO=$(curl -s "${AUTH_W[@]}" "$BASE/api/batches/$BATCH5_NO/trace" | jq -r '.bags[0].pointsIssue.issueNo')
+curl -s -X POST "${AUTH_S[@]}" "${JSON[@]}" "$BASE/api/points-issues/$PI2_NO/voucher" -d '{"note":"账户冻结改纸质券"}' > /dev/null
+check "失败单转券 VOUCHERED" "$(curl -s "${AUTH_S[@]}" "$BASE/api/points-issues/$PI2_NO" | jq -r '.issue.status')" "VOUCHERED"
+PV_NO=$(curl -s "${AUTH_S[@]}" "$BASE/api/points-issues/$PI2_NO" | jq -r '.issue.voucherNo')
+check "兑换券面值 30" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/vouchers/$PV_NO" | jq '.pointsValue')" "30"
+check "转券不入积分账户" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/points/balance" | jq '.balance')" "20"
+check "居民可见本人兑换券" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/vouchers/mine" | jq '[.[] | select(.voucherNo=="'$PV_NO'")] | length')" "1"
+curl -s -X POST "${AUTH_A[@]}" "${JSON[@]}" "$BASE/api/vouchers/$PV_NO/redeem" -d '{"note":"社区点已兑付"}' > /dev/null
+check "兑换券已兑付" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/vouchers/$PV_NO" | jq -r '.status')" "REDEEMED"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${AUTH_A[@]}" "${JSON[@]}" "$BASE/api/vouchers/$PV_NO/redeem" -d '{"note":"重复兑付"}')
+check "重复兑付被拒(409)" "$CODE" "409"
+curl -s -X POST "${AUTH_A[@]}" "${JSON[@]}" "$BASE/api/admin/points-accounts/unfreeze" -d "{\"residentId\": $RID2}" > /dev/null
+
+echo "== 17. 批次拒收 -> 已发积分冻结/追缴（余额不足记欠分，后续入账自动抵扣） =="
+# 居民2称重 5kg 发放 50，余额 70；兑换 50 分环保袋，余 20
+APPT6_NO=$(curl -s -X POST "${AUTH_R2[@]}" "${JSON[@]}" "$BASE/api/appointments" -d "{
+  \"siteId\": $SITE_ID, \"drugTypeDesc\": \"片剂整箱\", \"estimatedQty\": 5,
+  \"hasPrescription\": false, \"hasLiquid\": false, \"hasInjection\": false, \"hasPersonalInfo\": false}" | jq -r '.appointmentNo')
+BATCH6_NO=$(curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/batches/check-in" -d "{\"appointmentNo\": \"$APPT6_NO\"}" | jq -r '.batchNo')
+curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/batches/$BATCH6_NO/weigh" \
+  -d '{"items": [{"category": "TABLET", "weightKg": 5.0, "sealNo": "SEAL-FZ-2003", "photoUrls": "photo://fz"}]}' > /dev/null
+check "发放 50 后余额 70" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/points/balance" | jq '.balance')" "70"
+GIFT50_ID=$(curl -s "${AUTH_R2[@]}" "$BASE/api/catalog/gifts" | jq -r '[.[] | select(.costPoints==50)][0].id')
+curl -s -X POST "${AUTH_R2[@]}" "${JSON[@]}" "$BASE/api/points/exchange" -d "{\"giftId\": $GIFT50_ID}" > /dev/null
+check "兑换后余额 20" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/points/balance" | jq '.balance')" "20"
+BAG6_NO=$(curl -s "${AUTH_W[@]}" "$BASE/api/batches/$BATCH6_NO/trace" | jq -r '.bags[0].bag.bagNo')
+curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/storage/put" -d "{\"cabinetId\": $CABINET_ID, \"bagNos\": [\"$BAG6_NO\"]}" > /dev/null
+ORDER6_NO=$(curl -s -X POST "${AUTH_A[@]}" "${JSON[@]}" "$BASE/api/handovers" \
+  -d "{\"siteId\": $SITE_ID, \"companyName\": \"绿源环保科技\", \"destination\": \"市危废处理中心\", \"force\": true, \"bagNos\": [\"$BAG6_NO\"]}" | jq -r '.orderNo')
+curl -s -X POST "${AUTH_W[@]}" "$BASE/api/handovers/$ORDER6_NO/sign" > /dev/null
+curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/handovers/$ORDER6_NO/complete" \
+  -d "{\"receiverName\": \"绿源-张司机\", \"items\": [{\"bagNo\": \"$BAG6_NO\", \"accepted\": false, \"rejectReason\": \"整箱混装不在接收范围\"}]}" > /dev/null
+FZ_NO=$(curl -s "${AUTH_W[@]}" "$BASE/api/batches/$BATCH6_NO/trace" | jq -r '.bags[0].pointsFreeze.freezeNo')
+check "拒收产生冻结单" "$(echo "$FZ_NO" | grep -c '^FZ')" "1"
+check "当场冻结 20" "$(curl -s "${AUTH_A[@]}" "$BASE/api/points-freezes/$FZ_NO" | jq '.freeze.frozenPoints')" "20"
+check "不足形成追缴欠分 30" "$(curl -s "${AUTH_A[@]}" "$BASE/api/points-freezes/$FZ_NO" | jq '.freeze.outstandingPoints')" "30"
+check "拒收冻结后可用余额 0" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/points/balance" | jq '.balance')" "0"
+check "居民可见本人冻结单" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/points-freezes/mine" | jq '[.[] | select(.freezeNo=="'$FZ_NO'")] | length')" "1"
+curl -s -X POST "${AUTH_A[@]}" "${JSON[@]}" "$BASE/api/points-freezes/$FZ_NO/basis" \
+  -d '{"rejectedCategory":"TABLET","handlingBasis":"依据《社区过期药品回收积分管理办法》第12条，拒收品类已发积分冻结追缴"}' > /dev/null
+check "管理员登记拒收品类与依据" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/points-freezes/$FZ_NO" | jq -r '.freeze.handlingBasis' | grep -c '第12条')" "1"
+# 主动追缴当前可用 0：欠分不变
+curl -s -X POST "${AUTH_A[@]}" "${JSON[@]}" "$BASE/api/points-freezes/$FZ_NO/recover" -d '{"note":"催缴"}' > /dev/null
+check "无可用余额追缴欠分不变" "$(curl -s "${AUTH_A[@]}" "$BASE/api/points-freezes/$FZ_NO" | jq '.freeze.outstandingPoints')" "30"
+# 后续称重发放 3kg=30 自动抵扣欠分 30，欠分偿清冻结单核销
+APPT7_NO=$(curl -s -X POST "${AUTH_R2[@]}" "${JSON[@]}" "$BASE/api/appointments" -d "{
+  \"siteId\": $SITE_ID, \"drugTypeDesc\": \"片剂\", \"estimatedQty\": 3,
+  \"hasPrescription\": false, \"hasLiquid\": false, \"hasInjection\": false, \"hasPersonalInfo\": false}" | jq -r '.appointmentNo')
+BATCH7_NO=$(curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/batches/check-in" -d "{\"appointmentNo\": \"$APPT7_NO\"}" | jq -r '.batchNo')
+curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/batches/$BATCH7_NO/weigh" \
+  -d '{"items": [{"category": "TABLET", "weightKg": 3.0, "sealNo": "SEAL-RC-2004", "photoUrls": "photo://rc"}]}' > /dev/null
+check "入账自动抵扣后欠分清零" "$(curl -s "${AUTH_A[@]}" "$BASE/api/points-freezes/$FZ_NO" | jq '.freeze.outstandingPoints')" "0"
+check "冻结单全额追缴核销" "$(curl -s "${AUTH_A[@]}" "$BASE/api/points-freezes/$FZ_NO" | jq -r '.freeze.status')" "RECOVERED"
+check "累计追缴 50" "$(curl -s "${AUTH_A[@]}" "$BASE/api/points-freezes/$FZ_NO" | jq '.freeze.recoveredPoints')" "50"
+
+echo "== 18. 申诉成立解除冻结退回积分 =="
+# 居民2再称重 2kg 发放 20（欠分已清，全额入账）-> 余额 20
+APPT8_NO=$(curl -s -X POST "${AUTH_R2[@]}" "${JSON[@]}" "$BASE/api/appointments" -d "{
+  \"siteId\": $SITE_ID, \"drugTypeDesc\": \"片剂\", \"estimatedQty\": 2,
+  \"hasPrescription\": false, \"hasLiquid\": false, \"hasInjection\": false, \"hasPersonalInfo\": false}" | jq -r '.appointmentNo')
+BATCH8_NO=$(curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/batches/check-in" -d "{\"appointmentNo\": \"$APPT8_NO\"}" | jq -r '.batchNo')
+curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/batches/$BATCH8_NO/weigh" \
+  -d '{"items": [{"category": "TABLET", "weightKg": 2.0, "sealNo": "SEAL-RL-2005", "photoUrls": "photo://rl"}]}' > /dev/null
+check "新批次发放 20 入账" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/points/balance" | jq '.balance')" "20"
+BAG8_NO=$(curl -s "${AUTH_W[@]}" "$BASE/api/batches/$BATCH8_NO/trace" | jq -r '.bags[0].bag.bagNo')
+curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/storage/put" -d "{\"cabinetId\": $CABINET_ID, \"bagNos\": [\"$BAG8_NO\"]}" > /dev/null
+ORDER8_NO=$(curl -s -X POST "${AUTH_A[@]}" "${JSON[@]}" "$BASE/api/handovers" \
+  -d "{\"siteId\": $SITE_ID, \"companyName\": \"绿源环保科技\", \"destination\": \"市危废处理中心\", \"force\": true, \"bagNos\": [\"$BAG8_NO\"]}" | jq -r '.orderNo')
+curl -s -X POST "${AUTH_W[@]}" "$BASE/api/handovers/$ORDER8_NO/sign" > /dev/null
+curl -s -X POST "${AUTH_W[@]}" "${JSON[@]}" "$BASE/api/handovers/$ORDER8_NO/complete" \
+  -d "{\"receiverName\": \"绿源-张司机\", \"items\": [{\"bagNo\": \"$BAG8_NO\", \"accepted\": false, \"rejectReason\": \"外包装破损\"}]}" > /dev/null
+FZ2_NO=$(curl -s "${AUTH_W[@]}" "$BASE/api/batches/$BATCH8_NO/trace" | jq -r '.bags[0].pointsFreeze.freezeNo')
+check "余额充足全额冻结 20" "$(curl -s "${AUTH_A[@]}" "$BASE/api/points-freezes/$FZ2_NO" | jq '.freeze.frozenPoints')" "20"
+curl -s -X POST "${AUTH_A[@]}" "${JSON[@]}" "$BASE/api/points-freezes/$FZ2_NO/release" -d '{"note":"环保公司误拒收，申诉成立"}' > /dev/null
+check "申诉解冻状态 RELEASED" "$(curl -s "${AUTH_A[@]}" "$BASE/api/points-freezes/$FZ2_NO" | jq -r '.freeze.status')" "RELEASED"
+check "解冻积分退回可用 20" "$(curl -s "${AUTH_R2[@]}" "$BASE/api/points/balance" | jq '.balance')" "20"
+
 echo ""
 echo "==================================="
 echo "验证完成: 通过 $PASS 项, 失败 $FAIL 项"

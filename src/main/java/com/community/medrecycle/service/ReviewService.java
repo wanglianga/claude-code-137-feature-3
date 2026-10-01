@@ -63,6 +63,7 @@ public class ReviewService {
                 pointsService.revoke(batch.getResidentId(), bag.getPoints(), "BAG", bag.getBagNo(),
                         "复核拒绝扣回: " + note);
                 bag.setPointsGranted(false);
+                bag.setGrantedPoints(0);
                 bagRepository.save(bag);
             }
         }
