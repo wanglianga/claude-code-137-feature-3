@@ -1,4 +1,5 @@
-# 可选：一键启动本地 PostgreSQL（环境已有 PostgreSQL 时无需使用）
+# 一键启动：docker compose up -d --build
+# db: PostgreSQL 15；app: 社区药品回收服务（首次启动自动建表并写入演示数据）
 services:
   db:
     image: postgres:15
@@ -11,6 +12,28 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U medrecycle -d medrecycle"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: med-recycle-app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/medrecycle
+      DB_USER: medrecycle
+      DB_PASSWORD: medrecycle
+      SEED_DEMO_DATA: "true"
+      SERVER_PORT: "8080"
+    ports:
+      - "8080:8080"
 
 volumes:
   pgdata:

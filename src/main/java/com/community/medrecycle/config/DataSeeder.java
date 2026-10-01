@@ -28,7 +28,6 @@ public class DataSeeder implements ApplicationRunner {
 
     @Value("${app.seed-demo-data:true}")
     private boolean seedDemoData;
-
     @Override
     @Transactional
     public void run(ApplicationArguments args) {
@@ -64,6 +63,7 @@ public class DataSeeder implements ApplicationRunner {
         account("recycler1", "recycler123", "回收员-赵磊", Role.RECYCLER, site1.getId());
         account("recycler2", "recycler123", "回收员-孙敏", Role.RECYCLER, site2.getId());
         account("reviewer1", "reviewer123", "复核员-周药师", Role.REVIEWER, null);
+        account("service1", "service123", "客服-林悦", Role.CUSTOMER_SERVICE, null);
         Account resident1 = account("resident1", "resident123", "居民-陈晓", Role.RESIDENT, null);
         Account resident2 = account("resident2", "resident123", "居民-刘洋", Role.RESIDENT, null);
 

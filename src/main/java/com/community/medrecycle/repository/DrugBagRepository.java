@@ -11,5 +11,6 @@ public interface DrugBagRepository extends JpaRepository<DrugBag, Long> {
     Optional<DrugBag> findByBagNo(String bagNo);
     Optional<DrugBag> findBySealNo(String sealNo);
     List<DrugBag> findByBatchId(Long batchId);
+    List<DrugBag> findByBatchIdIn(List<Long> batchIds);
     List<DrugBag> findBySiteIdAndStatus(Long siteId, BagStatus status);
 }

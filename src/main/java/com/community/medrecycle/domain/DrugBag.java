@@ -1,5 +1,6 @@
 package com.community.medrecycle.domain;
 
+import com.community.medrecycle.domain.enums.BagPointsState;
 import com.community.medrecycle.domain.enums.BagStatus;
 import com.community.medrecycle.domain.enums.DrugCategory;
 import jakarta.persistence.*;
@@ -58,6 +59,15 @@ public class DrugBag {
 
     @Column(nullable = false)
     private boolean pointsGranted = false;
+
+    /** 本袋积分处理状态：未发放/正常/拒收冻结/已追缴 */
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 16)
+    private BagPointsState pointsState = BagPointsState.NOT_GRANTED;
+
+    /** 拒收后被冻结的积分（解冻或追缴后清零） */
+    @Column(nullable = false)
+    private int frozenPoints = 0;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 24)

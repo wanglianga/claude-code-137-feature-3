@@ -3,6 +3,7 @@ package com.community.medrecycle.service;
 import com.community.medrecycle.config.BizException;
 import com.community.medrecycle.config.NoGen;
 import com.community.medrecycle.domain.*;
+import com.community.medrecycle.domain.enums.BagPointsState;
 import com.community.medrecycle.domain.enums.BagStatus;
 import com.community.medrecycle.domain.enums.ExceptionType;
 import com.community.medrecycle.domain.enums.HandoverStatus;
@@ -26,6 +27,8 @@ public class HandoverService {
     private final StorageCabinetRepository cabinetRepository;
     private final StorageEntryRepository entryRepository;
     private final ExceptionService exceptionService;
+    private final PointsService pointsService;
+    private final RecycleBatchRepository batchRepository;
     private final BatchRefresher batchRefresher;
 
     /** 建交接单：默认取站点全部暂存袋；未达环保公司上门量时拒绝（可 force 强制） */
@@ -159,9 +162,21 @@ public class HandoverService {
                 // 拒收袋退回暂存，等待后续处理
                 bag.setStatus(BagStatus.STORED);
                 bagRepository.save(bag);
-                exceptionService.recordAuto(ExceptionType.COMPANY_REJECT, bag,
-                        "环保公司拒收 " + bag.getCategory() + " 袋 " + bag.getBagNo()
-                                + "，原因: " + (result.rejectReason() == null ? "未说明" : result.rejectReason()));
+                RecycleBatch rejectedBatch = batchRepository.findById(bag.getBatchId()).orElseThrow();
+                ExceptionRecord rejectEx = exceptionService.recordReject(rejectedBatch, bag,
+                        result.rejectReason(), order.getCompanyName());
+                // 已发积分随拒收进入冻结/追缴流程：可用部分冻结，已兑换部分登记欠费
+                if (bag.isPointsGranted()
+                        && bag.getPointsState() != BagPointsState.FROZEN
+                        && bag.getPointsState() != BagPointsState.REVOKED) {
+                    int[] split = pointsService.freezeRejectedPoints(
+                            rejectedBatch.getResidentId(), bag.getPoints(), "BAG", bag.getBagNo(),
+                            "环保公司拒收，积分冻结待追缴/解冻，袋 " + bag.getBagNo());
+                    bag.setPointsState(BagPointsState.FROZEN);
+                    bag.setFrozenPoints(split[0]);
+                    bagRepository.save(bag);
+                    rejectEx.setAffectedPoints(bag.getPoints());
+                }
             }
             itemRepository.save(item);
             batchIds.add(bag.getBatchId());

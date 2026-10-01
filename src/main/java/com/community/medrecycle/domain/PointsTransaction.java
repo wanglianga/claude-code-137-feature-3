@@ -46,6 +46,9 @@ public class PointsTransaction {
     @Column(length = 256)
     private String remark;
 
+    /** 冻结/解冻流水记录变动后的冻结积分，其余类型为空 */
+    private Integer frozenBalanceAfter;
+
     @Column(nullable = false)
     private LocalDateTime createdAt = LocalDateTime.now();
 }

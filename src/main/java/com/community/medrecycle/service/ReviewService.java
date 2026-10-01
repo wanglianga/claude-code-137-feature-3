@@ -2,11 +2,15 @@ package com.community.medrecycle.service;
 
 import com.community.medrecycle.config.BizException;
 import com.community.medrecycle.domain.DrugBag;
+import com.community.medrecycle.domain.PointsGrantFailure;
 import com.community.medrecycle.domain.RecycleBatch;
 import com.community.medrecycle.domain.ReviewTask;
+import com.community.medrecycle.domain.enums.BagPointsState;
 import com.community.medrecycle.domain.enums.BagStatus;
+import com.community.medrecycle.domain.enums.GrantFailureStatus;
 import com.community.medrecycle.domain.enums.ReviewStatus;
 import com.community.medrecycle.repository.DrugBagRepository;
+import com.community.medrecycle.repository.PointsGrantFailureRepository;
 import com.community.medrecycle.repository.RecycleBatchRepository;
 import com.community.medrecycle.repository.ReviewTaskRepository;
 import lombok.RequiredArgsConstructor;
@@ -24,6 +28,7 @@ public class ReviewService {
     private final ReviewTaskRepository reviewTaskRepository;
     private final DrugBagRepository bagRepository;
     private final RecycleBatchRepository batchRepository;
+    private final PointsGrantFailureRepository grantFailureRepository;
     private final BatchService batchService;
     private final PointsService pointsService;
     private final BatchRefresher batchRefresher;
@@ -63,8 +68,19 @@ public class ReviewService {
                 pointsService.revoke(batch.getResidentId(), bag.getPoints(), "BAG", bag.getBagNo(),
                         "复核拒绝扣回: " + note);
                 bag.setPointsGranted(false);
+                bag.setPointsState(BagPointsState.REVOKED);
                 bagRepository.save(bag);
             }
+            // 此前发放失败仍挂起的，随复核拒绝一并驳回，避免客服对否决袋补发
+            grantFailureRepository.findByBagNoAndStatus(bag.getBagNo(), GrantFailureStatus.PENDING)
+                    .ifPresent(failure -> {
+                        failure.setStatus(GrantFailureStatus.REJECTED);
+                        failure.setReviewNote("人工复核拒绝，异常积分不予发放: " + note);
+                        failure.setHandledAt(LocalDateTime.now());
+                        grantFailureRepository.save(failure);
+                        bag.setPointsState(BagPointsState.REVOKED);
+                        bagRepository.save(bag);
+                    });
         }
 
         batchRefresher.refresh(batch.getId());

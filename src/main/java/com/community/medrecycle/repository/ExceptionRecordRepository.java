@@ -11,5 +11,6 @@ public interface ExceptionRecordRepository extends JpaRepository<ExceptionRecord
     Optional<ExceptionRecord> findByExceptionNo(String exceptionNo);
     List<ExceptionRecord> findByStatusOrderByCreatedAtDesc(ExceptionStatus status);
     List<ExceptionRecord> findByBatchId(Long batchId);
+    List<ExceptionRecord> findByResidentIdOrderByCreatedAtDesc(Long residentId);
     long countByStatus(ExceptionStatus status);
 }

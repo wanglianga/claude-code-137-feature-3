@@ -28,6 +28,7 @@ public class BatchService {
     private final HandoverOrderRepository handoverOrderRepository;
     private final ExceptionRecordRepository exceptionRecordRepository;
     private final PointsTransactionRepository pointsTransactionRepository;
+    private final PointsGrantFailureRepository grantFailureRepository;
     private final PointsRuleService pointsRuleService;
     private final PointsService pointsService;
     private final BatchRefresher batchRefresher;
@@ -161,14 +162,50 @@ public class BatchService {
         reviewTaskRepository.save(task);
     }
 
-    /** 发放单袋积分（幂等：已发放则跳过） */
+    /**
+     * 发放单袋积分（幂等：已发放/已冻结则跳过）。发放失败（账户冻结/不存在）不回滚称重，
+     * 而是落积分发放失败单（含失败原因、规则快照、批次封袋、账户状态快照）等待客服复核。
+     */
     void grantBagPoints(RecycleBatch batch, DrugBag bag) {
-        if (bag.isPointsGranted() || bag.getPoints() <= 0) {
+        if (bag.isPointsGranted() || bag.getPoints() <= 0
+                || bag.getPointsState() == BagPointsState.FROZEN) {
             return;
         }
-        pointsService.grant(batch.getResidentId(), bag.getPoints(), "BAG", bag.getBagNo(),
+        if (grantFailureRepository.findByBagNoAndStatus(bag.getBagNo(), GrantFailureStatus.PENDING).isPresent()) {
+            // 已有待复核的发放失败单，不重复登记
+            return;
+        }
+        Appointment appointment = appointmentRepository.findById(batch.getAppointmentId()).orElseThrow();
+        PointsService.GrantResult result = pointsService.tryGrant(
+                batch.getResidentId(), bag.getPoints(), "BAG", bag.getBagNo(),
                 "回收发放 " + bag.getCategory() + " " + bag.getWeightKg() + "kg");
-        bag.setPointsGranted(true);
+        if (result.success()) {
+            bag.setPointsGranted(true);
+            bag.setPointsState(BagPointsState.GRANTED);
+            bagRepository.save(bag);
+            return;
+        }
+
+        PointsGrantFailure failure = new PointsGrantFailure();
+        failure.setFailureNo(NoGen.next("GF"));
+        failure.setResidentId(batch.getResidentId());
+        failure.setBatchId(batch.getId());
+        failure.setBatchNo(batch.getBatchNo());
+        failure.setBagId(bag.getId());
+        failure.setBagNo(bag.getBagNo());
+        failure.setCategory(bag.getCategory().name());
+        failure.setWeightKg(bag.getWeightKg());
+        failure.setPoints(bag.getPoints());
+        failure.setPointsRuleSnapshot(appointment.getPointsRuleSnapshot());
+        failure.setPointsMultiplier(batch.getPointsMultiplier());
+        failure.setFailReason(result.failReason());
+        failure.setAccountStatus(result.accountStatus() == null ? AccountStatus.NOT_FOUND : result.accountStatus());
+        failure.setAccountBalance(result.balanceAfter());
+        failure.setAccountFrozenPoints(result.accountFrozenPoints());
+        grantFailureRepository.save(failure);
+
+        bag.setPointsGranted(false);
+        bag.setPointsState(BagPointsState.NOT_GRANTED);
         bagRepository.save(bag);
     }
 

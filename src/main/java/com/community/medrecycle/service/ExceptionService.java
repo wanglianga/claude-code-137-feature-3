@@ -3,6 +3,7 @@ package com.community.medrecycle.service;
 import com.community.medrecycle.config.BizException;
 import com.community.medrecycle.config.NoGen;
 import com.community.medrecycle.domain.*;
+import com.community.medrecycle.domain.enums.BagPointsState;
 import com.community.medrecycle.domain.enums.BagStatus;
 import com.community.medrecycle.domain.enums.ExceptionStatus;
 import com.community.medrecycle.domain.enums.ExceptionType;
@@ -51,6 +52,7 @@ public class ExceptionService {
         if (batch != null) {
             record.setBatchId(batch.getId());
             record.setBatchNo(batch.getBatchNo());
+            record.setResidentId(batch.getResidentId());
         }
         if (bag != null) {
             record.setBagId(bag.getId());
@@ -74,6 +76,8 @@ public class ExceptionService {
                     pointsService.revoke(batch.getResidentId(), bag.getPoints(), "BAG", bag.getBagNo(),
                             "夹带未过期药扣回，异常单 " + record.getExceptionNo());
                     bag.setPointsGranted(false);
+                    bag.setPointsState(BagPointsState.REVOKED);
+                    bagRepository.save(bag);
                 }
                 sendBackToReview(batch, bag, "NON_EXPIRED_DRUG");
             }
@@ -101,7 +105,25 @@ public class ExceptionService {
         reviewTaskRepository.save(task);
     }
 
-    /** 交接完成时自动记录环保公司拒收异常 */
+    /** 交接完成时自动记录环保公司拒收异常：登记拒收品类、关联居民，积分已由交接流程冻结 */
+    @Transactional
+    public ExceptionRecord recordReject(RecycleBatch batch, DrugBag bag, String rejectReason, String companyName) {
+        ExceptionRecord record = new ExceptionRecord();
+        record.setExceptionNo(NoGen.next("EX"));
+        record.setType(ExceptionType.COMPANY_REJECT);
+        record.setDescription("环保公司" + (companyName == null ? "" : "（" + companyName + "）")
+                + "拒收 " + bag.getCategory().getDescription() + " 袋 " + bag.getBagNo()
+                + "，原因: " + (rejectReason == null || rejectReason.isBlank() ? "未说明" : rejectReason));
+        record.setBatchId(batch.getId());
+        record.setBatchNo(batch.getBatchNo());
+        record.setBagId(bag.getId());
+        record.setBagNo(bag.getBagNo());
+        record.setResidentId(batch.getResidentId());
+        record.setRejectCategory(bag.getCategory().name());
+        return exceptionRepository.save(record);
+    }
+
+    /** 交接完成时自动记录异常（通用，保留兼容） */
     @Transactional
     public ExceptionRecord recordAuto(ExceptionType type, DrugBag bag, String description) {
         RecycleBatch batch = batchRepository.findById(bag.getBatchId()).orElseThrow();
@@ -113,6 +135,86 @@ public class ExceptionService {
         record.setBatchNo(batch.getBatchNo());
         record.setBagId(bag.getId());
         record.setBagNo(bag.getBagNo());
+        record.setResidentId(batch.getResidentId());
+        return exceptionRepository.save(record);
+    }
+
+    /**
+     * 社区管理员处置拒收积分：CLAWBACK 追缴（冻结积分扣回、欠费保留冲抵）
+     * 或 UNFREEZE 解冻（申述成立/重新交接成功，冻结积分恢复可用、对应欠费豁免）。
+     * 必须登记处理依据，并形成给居民的告知（拒收品类 + 处理依据）。
+     */
+    @Transactional
+    public ExceptionRecord handleReject(Long adminId, String exceptionNo, String action,
+                                        String regulationBasis, String residentNotice) {
+        ExceptionRecord record = get(exceptionNo);
+        if (record.getType() != ExceptionType.COMPANY_REJECT) {
+            throw BizException.badRequest("仅环保公司拒收异常支持冻结/追缴处置");
+        }
+        if (record.getStatus() == ExceptionStatus.RESOLVED) {
+            throw BizException.conflict("拒收异常已处置: " + record.getResolutionAction());
+        }
+        if (regulationBasis == null || regulationBasis.isBlank()) {
+            throw BizException.badRequest("必须填写处理依据（制度条款/拒收名录条目）");
+        }
+        boolean clawback = "CLAWBACK".equalsIgnoreCase(action);
+        boolean unfreeze = "UNFREEZE".equalsIgnoreCase(action);
+        if (!clawback && !unfreeze) {
+            throw BizException.badRequest("处置动作只支持 CLAWBACK（追缴）或 UNFREEZE（解冻）");
+        }
+
+        DrugBag bag = bagRepository.findById(record.getBagId())
+                .orElseThrow(() -> BizException.notFound("关联封袋不存在"));
+        RecycleBatch batch = batchRepository.findById(bag.getBatchId()).orElseThrow();
+        int frozenPart = bag.getFrozenPoints();
+        int debtPart = Math.max(0, bag.getPoints() - frozenPart);
+
+        String conclusion;
+        if (clawback) {
+            if (bag.getPointsState() != BagPointsState.FROZEN) {
+                throw BizException.conflict("该封袋积分不处于拒收冻结状态，当前状态: " + bag.getPointsState());
+            }
+            if (frozenPart > 0) {
+                pointsService.clawback(batch.getResidentId(), frozenPart, "BAG", bag.getBagNo(),
+                        "拒收追缴，异常单 " + record.getExceptionNo() + "，依据: " + regulationBasis);
+            }
+            bag.setPointsGranted(false);
+            bag.setPointsState(BagPointsState.REVOKED);
+            bag.setFrozenPoints(0);
+            bagRepository.save(bag);
+            conclusion = frozenPart > 0
+                    ? "已追缴冻结积分 " + frozenPart + " 分"
+                            + (debtPart > 0 ? "，另有 " + debtPart + " 分因已兑换转为欠费，后续积分自动冲抵" : "")
+                    : "积分在拒收前已被兑换，" + debtPart + " 分已登记欠费，后续积分自动冲抵";
+        } else {
+            if (bag.getPointsState() != BagPointsState.FROZEN || frozenPart <= 0) {
+                throw BizException.conflict("该封袋没有可解冻的冻结积分，当前状态: " + bag.getPointsState());
+            }
+            if (frozenPart > 0) {
+                pointsService.unfreezeRejected(batch.getResidentId(), frozenPart, debtPart,
+                        "BAG", bag.getBagNo(),
+                        "拒收申述成立/重新交接成功，积分解除冻结，异常单 " + record.getExceptionNo());
+            }
+            bag.setPointsState(BagPointsState.GRANTED);
+            bag.setFrozenPoints(0);
+            bagRepository.save(bag);
+            conclusion = "冻结积分 " + frozenPart + " 分已解除冻结恢复可用"
+                    + (debtPart > 0 ? "，已兑换部分 " + debtPart + " 分欠费一并豁免" : "");
+        }
+
+        record.setResolutionAction(clawback ? "CLAWBACK" : "UNFREEZE");
+        record.setRegulationBasis(regulationBasis);
+        record.setAffectedPoints(bag.getPoints());
+        String notice = (residentNotice == null || residentNotice.isBlank())
+                ? String.format("您于批次 %s 交投的%s（袋号 %s，%d 积分）被环保公司拒收。%s。处理依据：%s。",
+                        batch.getBatchNo(), bag.getCategory().getDescription(), bag.getBagNo(),
+                        bag.getPoints(), conclusion, regulationBasis)
+                : residentNotice;
+        record.setResidentNotice(notice);
+        record.setStatus(ExceptionStatus.RESOLVED);
+        record.setHandlerId(adminId);
+        record.setResolution(conclusion);
+        record.setResolvedAt(LocalDateTime.now());
         return exceptionRepository.save(record);
     }
 
@@ -192,5 +294,11 @@ public class ExceptionService {
         return status == null
                 ? exceptionRepository.findAll()
                 : exceptionRepository.findByStatusOrderByCreatedAtDesc(status);
+    }
+
+    /** 居民查看与本人相关的异常告知（拒收品类、处理依据、处置结论） */
+    @Transactional(readOnly = true)
+    public List<ExceptionRecord> listByResident(Long residentId) {
+        return exceptionRepository.findByResidentIdOrderByCreatedAtDesc(residentId);
     }
 }

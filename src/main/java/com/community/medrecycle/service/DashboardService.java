@@ -4,6 +4,7 @@ import com.community.medrecycle.config.BizException;
 import com.community.medrecycle.domain.*;
 import com.community.medrecycle.domain.enums.BagStatus;
 import com.community.medrecycle.domain.enums.ExceptionStatus;
+import com.community.medrecycle.domain.enums.GrantFailureStatus;
 import com.community.medrecycle.domain.enums.ReviewStatus;
 import com.community.medrecycle.repository.*;
 import lombok.RequiredArgsConstructor;
@@ -25,6 +26,7 @@ public class DashboardService {
     private final DrugBagRepository bagRepository;
     private final ReviewTaskRepository reviewTaskRepository;
     private final ExceptionRecordRepository exceptionRepository;
+    private final PointsGrantFailureRepository grantFailureRepository;
     private final StorageService storageService;
 
     @Transactional(readOnly = true)
@@ -68,6 +70,7 @@ public class DashboardService {
         result.put("pendingReviews", reviewTaskRepository.findByStatusOrderByCreatedAtAsc(ReviewStatus.PENDING).size());
         result.put("openExceptions", exceptionRepository.countByStatus(ExceptionStatus.OPEN)
                 + exceptionRepository.countByStatus(ExceptionStatus.PROCESSING));
+        result.put("pendingGrantFailures", grantFailureRepository.countByStatus(GrantFailureStatus.PENDING));
         return result;
     }
 }
